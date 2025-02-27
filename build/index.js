@@ -18,6 +18,14 @@ const schemas = {
         list_events: z.object({
             start_time: z.string(),
             end_time: z.string()
+        }),
+        create_event: z.object({
+            summary: z.string(),
+            description: z.string().optional(),
+            start_time: z.string(),
+            end_time: z.string(),
+            location: z.string().optional(),
+            need_notification: z.boolean().optional()
         })
     }
 };
@@ -45,14 +53,48 @@ const TOOL_DEFINITIONS = [
             properties: {
                 start_time: {
                     type: "string",
-                    description: "Start time in ISO format (e.g. 2024-03-20T10:00:00Z)"
+                    description: "Start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
                 },
                 end_time: {
                     type: "string",
-                    description: "End time in ISO format (e.g. 2024-03-20T11:00:00Z)"
+                    description: "End time in ISO format with UTC+8 timezone (e.g. 2024-03-20T11:00:00+08:00)"
                 },
             },
         }
+    },
+    {
+        name: "create_event",
+        description: "Create a calendar event on Lark",
+        inputSchema: {
+            type: "object",
+            properties: {
+                summary: {
+                    type: "string",
+                    description: "Event title or summary"
+                },
+                description: {
+                    type: "string",
+                    description: "Event description (optional)"
+                },
+                start_time: {
+                    type: "string",
+                    description: "Event start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
+                },
+                end_time: {
+                    type: "string",
+                    description: "Event end time in ISO format with UTC+8 timezone (e.g. 2024-03-20T11:00:00+08:00)"
+                },
+                location: {
+                    type: "string",
+                    description: "Event location (optional)"
+                },
+                need_notification: {
+                    type: "boolean",
+                    description: "Whether to send notification to participants (default: true)"
+                }
+            },
+            required: ["summary", "start_time", "end_time"]
+        },
     }
 ];
 // Tool implementation handlers
@@ -162,6 +204,80 @@ const toolHandlers = {
                         "No active events found in the given time range"
                 }]
         };
+    },
+    async create_event(args) {
+        const { summary, description, start_time, end_time, location, need_notification } = schemas.toolInputs.create_event.parse(args);
+        try {
+            // Convert ISO strings to time_info objects
+            const startTimestamp = Math.floor(Date.parse(start_time) / 1000).toString();
+            const endTimestamp = Math.floor(Date.parse(end_time) / 1000).toString();
+            // Create request data
+            const requestData = {
+                summary,
+                need_notification: need_notification ?? true,
+                start_time: {
+                    timestamp: startTimestamp,
+                    timezone: "Asia/Shanghai"
+                },
+                end_time: {
+                    timestamp: endTimestamp,
+                    timezone: "Asia/Shanghai"
+                }
+            };
+            // Add optional fields if provided
+            if (description) {
+                requestData.description = description;
+            }
+            if (location) {
+                requestData.location = {
+                    name: location
+                };
+            }
+            // Generate a UUID for idempotency_key
+            console.error("Creating event with data:", JSON.stringify(requestData, null, 2));
+            const result = await client.calendar.v4.calendarEvent.create({
+                path: {
+                    calendar_id: process.env.LARK_CALENDAR_ID,
+                },
+                data: requestData
+            }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN));
+            console.error("Received response:", JSON.stringify(result, null, 2));
+            if (!result) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: "Failed to create event in Lark calendar"
+                        }]
+                };
+            }
+            if (result.code !== 0) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Failed to create event: ${result.msg || "Unknown error"}`
+                        }]
+                };
+            }
+            // Extract event details from the response
+            const eventData = result.data?.event;
+            const eventId = eventData?.event_id || "unknown";
+            const eventSummary = eventData?.summary || summary;
+            return {
+                content: [{
+                        type: "text",
+                        text: `Event "${eventSummary}" created successfully!\nEvent ID: ${eventId}`
+                    }]
+            };
+        }
+        catch (error) {
+            console.error("Error creating Lark calendar event:", error);
+            return {
+                content: [{
+                        type: "text",
+                        text: `Error creating event: ${error instanceof Error ? error.message : "Unknown error"}`
+                    }]
+            };
+        }
     }
 };
 // Create server instance
