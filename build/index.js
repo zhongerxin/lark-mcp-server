@@ -18,6 +18,28 @@ const schemas = {
         list_events: z.object({
             start_time: z.string(),
             end_time: z.string()
+        }),
+        create_event: z.object({
+            summary: z.string(),
+            description: z.string().optional(),
+            start_time: z.string(),
+            end_time: z.string(),
+            location: z.string().optional(),
+            need_notification: z.boolean().optional()
+        }),
+        add_attendees: z.object({
+            event_id: z.string(),
+            attendees: z.array(z.object({
+                type: z.enum(["user", "chat", "resource", "third_party"]),
+                user_id: z.string().optional(),
+                chat_id: z.string().optional(),
+                resource_id: z.string().optional(),
+                third_party_email: z.string().optional(),
+                is_optional: z.boolean().optional(),
+                operate_id: z.string().optional(),
+                approval_reason: z.string().optional()
+            })),
+            need_notification: z.boolean().optional()
         })
     }
 };
@@ -45,13 +67,108 @@ const TOOL_DEFINITIONS = [
             properties: {
                 start_time: {
                     type: "string",
-                    description: "Start time in ISO format (e.g. 2024-03-20T10:00:00Z)"
+                    description: "Start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
                 },
                 end_time: {
                     type: "string",
-                    description: "End time in ISO format (e.g. 2024-03-20T11:00:00Z)"
+                    description: "End time in ISO format with UTC+8 timezone (e.g. 2024-03-20T11:00:00+08:00)"
                 },
             },
+        }
+    },
+    {
+        name: "create_event",
+        description: "Create a calendar event on Lark",
+        inputSchema: {
+            type: "object",
+            properties: {
+                summary: {
+                    type: "string",
+                    description: "Event title or summary"
+                },
+                description: {
+                    type: "string",
+                    description: "Event description (optional)"
+                },
+                start_time: {
+                    type: "string",
+                    description: "Event start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
+                },
+                end_time: {
+                    type: "string",
+                    description: "Event end time in ISO format with UTC+8 timezone (e.g. 2024-03-20T11:00:00+08:00)"
+                },
+                location: {
+                    type: "string",
+                    description: "Event location (optional)"
+                },
+                need_notification: {
+                    type: "boolean",
+                    description: "Whether to send notification to participants (default: true)"
+                }
+            },
+            required: ["summary", "start_time", "end_time"]
+        },
+    },
+    {
+        name: "add_attendees",
+        description: "Add attendees to a calendar event on Lark",
+        inputSchema: {
+            type: "object",
+            properties: {
+                event_id: {
+                    type: "string",
+                    description: "ID of the event to add attendees to"
+                },
+                attendees: {
+                    type: "array",
+                    description: "List of attendees to add to the event",
+                    items: {
+                        type: "object",
+                        properties: {
+                            type: {
+                                type: "string",
+                                description: "Type of attendee: 'user', 'chat', 'resource', or 'third_party'",
+                                enum: ["user", "chat", "resource", "third_party"]
+                            },
+                            user_id: {
+                                type: "string",
+                                description: "User ID when type is 'user'"
+                            },
+                            chat_id: {
+                                type: "string",
+                                description: "Chat/Group ID when type is 'chat'"
+                            },
+                            resource_id: {
+                                type: "string",
+                                description: "Resource (meeting room) ID when type is 'resource'"
+                            },
+                            third_party_email: {
+                                type: "string",
+                                description: "Email address when type is 'third_party'"
+                            },
+                            is_optional: {
+                                type: "boolean",
+                                description: "Whether the attendee is optional (default: false)"
+                            },
+                            operate_id: {
+                                type: "string",
+                                description: "Operator ID for room booking contact"
+                            },
+                            approval_reason: {
+                                type: "string",
+                                description: "Reason for booking a room"
+                            }
+                        },
+                        required: ["type"]
+                    }
+                },
+                need_notification: {
+                    type: "boolean",
+                    description: "Whether to send notifications to added attendees (default: true)"
+                }
+            },
+            required: ["event_id", "attendees"]
         }
     }
 ];
@@ -162,6 +279,175 @@ const toolHandlers = {
                         "No active events found in the given time range"
                 }]
         };
+    },
+    async create_event(args) {
+        const { summary, description, start_time, end_time, location, need_notification } = schemas.toolInputs.create_event.parse(args);
+        try {
+            // Convert ISO strings to time_info objects
+            const startTimestamp = Math.floor(Date.parse(start_time) / 1000).toString();
+            const endTimestamp = Math.floor(Date.parse(end_time) / 1000).toString();
+            // Create request data
+            const requestData = {
+                summary,
+                need_notification: need_notification ?? true,
+                start_time: {
+                    timestamp: startTimestamp,
+                    timezone: "Asia/Shanghai"
+                },
+                end_time: {
+                    timestamp: endTimestamp,
+                    timezone: "Asia/Shanghai"
+                }
+            };
+            // Add optional fields if provided
+            if (description) {
+                requestData.description = description;
+            }
+            if (location) {
+                requestData.location = {
+                    name: location
+                };
+            }
+            // Generate a UUID for idempotency_key
+            console.error("Creating event with data:", JSON.stringify(requestData, null, 2));
+            const result = await client.calendar.v4.calendarEvent.create({
+                path: {
+                    calendar_id: process.env.LARK_CALENDAR_ID,
+                },
+                data: requestData
+            }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN));
+            console.error("Received response:", JSON.stringify(result, null, 2));
+            if (!result) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: "Failed to create event in Lark calendar"
+                        }]
+                };
+            }
+            if (result.code !== 0) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Failed to create event: ${result.msg || "Unknown error"}`
+                        }]
+                };
+            }
+            // Extract event details from the response
+            const eventData = result.data?.event;
+            const eventId = eventData?.event_id || "unknown";
+            const eventSummary = eventData?.summary || summary;
+            return {
+                content: [{
+                        type: "text",
+                        text: `Event "${eventSummary}" created successfully!\nEvent ID: ${eventId}`
+                    }]
+            };
+        }
+        catch (error) {
+            console.error("Error creating Lark calendar event:", error);
+            return {
+                content: [{
+                        type: "text",
+                        text: `Error creating event: ${error instanceof Error ? error.message : "Unknown error"}`
+                    }]
+            };
+        }
+    },
+    async add_attendees(args) {
+        const { event_id, attendees, need_notification } = schemas.toolInputs.add_attendees.parse(args);
+        try {
+            // Transform attendees to Lark API format
+            const transformedAttendees = attendees.map(attendee => {
+                const transformedAttendee = {
+                    type: attendee.type,
+                    is_optional: attendee.is_optional || false
+                };
+                // Add type-specific ID field
+                switch (attendee.type) {
+                    case "user":
+                        if (!attendee.user_id) {
+                            throw new Error("user_id is required when type is 'user'");
+                        }
+                        transformedAttendee.user_id = attendee.user_id;
+                        break;
+                    case "chat":
+                        if (!attendee.chat_id) {
+                            throw new Error("chat_id is required when type is 'chat'");
+                        }
+                        transformedAttendee.chat_id = attendee.chat_id;
+                        break;
+                    case "resource":
+                        if (!attendee.resource_id) {
+                            throw new Error("resource_id is required when type is 'resource'");
+                        }
+                        transformedAttendee.resource_id = attendee.resource_id;
+                        break;
+                    case "third_party":
+                        if (!attendee.third_party_email) {
+                            throw new Error("third_party_email is required when type is 'third_party'");
+                        }
+                        transformedAttendee.third_party_email = attendee.third_party_email;
+                        break;
+                }
+                // Add optional fields if present
+                if (attendee.operate_id) {
+                    transformedAttendee.operate_id = attendee.operate_id;
+                }
+                if (attendee.approval_reason) {
+                    transformedAttendee.approval_reason = attendee.approval_reason;
+                }
+                return transformedAttendee;
+            });
+            // Prepare request data
+            const requestData = {
+                attendees: transformedAttendees,
+                need_notification: need_notification ?? true
+            };
+            console.error(`Adding attendees to event ${event_id} with data:`, JSON.stringify(requestData, null, 2));
+            const result = await client.calendar.v4.calendarEventAttendee.create({
+                path: {
+                    calendar_id: process.env.LARK_CALENDAR_ID,
+                    event_id: event_id
+                },
+                data: requestData
+            }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN));
+            console.error("Received response:", JSON.stringify(result, null, 2));
+            if (!result) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: "Failed to add attendees to event"
+                        }]
+                };
+            }
+            if (result.code !== 0) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Failed to add attendees: ${result.msg || "Unknown error"}`
+                        }]
+                };
+            }
+            // Get information about added attendees
+            const addedAttendees = result.data?.attendees || [];
+            const attendeeCount = addedAttendees.length;
+            return {
+                content: [{
+                        type: "text",
+                        text: `Successfully added ${attendeeCount} attendee(s) to the event`
+                    }]
+            };
+        }
+        catch (error) {
+            console.error("Error adding attendees to event:", error);
+            return {
+                content: [{
+                        type: "text",
+                        text: `Error adding attendees: ${error instanceof Error ? error.message : "Unknown error"}`
+                    }]
+            };
+        }
     }
 };
 // Create server instance
