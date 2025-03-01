@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
+import { isRecurrenceInRange } from './utils/recurrence.js';
 
 // Create Lark client instance
 const client = new lark.Client({
@@ -19,7 +20,8 @@ const schemas = {
     }),
     list_events: z.object({
       start_time: z.string(),
-      end_time: z.string()
+      end_time: z.string(),
+      calendar_id: z.string()
     }),
     create_event: z.object({
       summary: z.string(),
@@ -70,6 +72,10 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
+        calendar_id: {
+          type: "string",
+          description: "ID of the calendar to list events from, default is the user's own calendar id please just use primary"
+        },
         start_time: {
           type: "string",
           description: "Start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
@@ -236,7 +242,7 @@ const toolHandlers = {
   },
 
   async list_events(args: unknown) {
-    const { start_time, end_time } = schemas.toolInputs.list_events.parse(args);
+    const { start_time, end_time, calendar_id } = schemas.toolInputs.list_events.parse(args);
     
     // Convert ISO strings to Unix timestamps
     const startUnix = Math.floor(new Date(start_time).getTime() / 1000).toString();
@@ -244,10 +250,10 @@ const toolHandlers = {
     
     const result = await client.calendar.v4.calendarEvent.list({
       path: {
-        calendar_id: process.env.LARK_CALENDAR_ID!,
+        calendar_id: calendar_id === "primary" ? process.env.LARK_CALENDAR_ID! : calendar_id,
       },
       params: {
-        page_size: 500,
+        page_size: 1000,
         start_time: startUnix,
         end_time: endUnix,
       }
@@ -275,9 +281,25 @@ const toolHandlers = {
 
     const allEvents = result.data?.items || [];
     // Filter out cancelled events
-    const events = allEvents.filter(event => 
-      event.status !== "cancelled" && 
-      event.is_exception !== true
+    const events = allEvents.filter(event =>
+      (event.status !== "cancelled" &&
+      event.start_time?.timestamp && 
+      event.end_time?.timestamp &&
+      parseInt(event.start_time.timestamp) >= parseInt(startUnix) &&
+      parseInt(event.end_time.timestamp) <= parseInt(endUnix)) ||
+      (event.recurrence !== "" &&
+      event.status !== "cancelled" &&
+      isRecurrenceInRange(
+        event.recurrence || "",
+        {
+          startTime: parseInt(event.start_time?.timestamp || "0"),
+          endTime: parseInt(event.end_time?.timestamp || "0")
+        },
+        {
+          startTime: parseInt(startUnix),
+          endTime: parseInt(endUnix)
+        }
+      ))
     );
 
     
@@ -290,8 +312,10 @@ const toolHandlers = {
         summary: event.summary || "",
         organizer: event.event_organizer?.display_name || "",
         status: event.status || "unknown",
-        startTime: new Date(parseInt(startTimestamp) * 1000).toISOString(),
-        endTime: new Date(parseInt(endTimestamp) * 1000).toISOString()
+        startTime: new Date(parseInt(startTimestamp) * 1000).toLocaleString(),
+        endTime: new Date(parseInt(endTimestamp) * 1000).toLocaleString(),
+        // 临时测试添加
+        rerecurrence: event.recurrence
       };
     });
 
@@ -576,3 +600,4 @@ main().catch((error) => {
   console.error("Fatal error in main():", error);
   process.exit(1);
 });
+
