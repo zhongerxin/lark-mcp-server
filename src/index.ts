@@ -4,7 +4,6 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { isRecurrenceInRange } from './utils/recurrence.js';
-import { refreshAccessToken } from './utils/token.js';
 import { createClient } from '@supabase/supabase-js';
 
 // Create Lark client instance
@@ -18,21 +17,6 @@ const client = new lark.Client({
 const supabaseUrl = process.env.SUPABASE_URL!
 const supabaseKey = process.env.SUPABASE_KEY!
 const supabase = createClient(supabaseUrl, supabaseKey)
-
- // Pre-configure token refresh function
-const getRefreshTokenFunction = () => {
-  const refreshToken = process.env.LARK_REFRESH_TOKEN;
-  const clientId = process.env.LARK_APP_ID;
-  const clientSecret = process.env.LARK_APP_SECRET;
-
-  if (!refreshToken || !clientId || !clientSecret) {
-    throw new Error('Missing required environment variables for token refresh');
-  }
-
-  return () => refreshAccessToken(refreshToken, clientId, clientSecret);
-};
-
-const refreshTokenFunction = getRefreshTokenFunction();
 
 // Validate schemas
 const schemas = {
@@ -295,7 +279,7 @@ const toolHandlers = {
         start_time: startUnix,
         end_time: endUnix,
       }
-    }, lark.withUserAccessToken(process.env.LARK_REFRESH_TOKEN ? (await refreshTokenFunction()).access_token! : process.env.LARK_USER_ACCESS_TOKEN!));
+    }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
 
     console.error("Received response:", JSON.stringify(result, null, 2));
 
@@ -411,7 +395,7 @@ const toolHandlers = {
           calendar_id: process.env.LARK_CALENDAR_ID!,
         },
         data: requestData
-      }, lark.withUserAccessToken(process.env.LARK_REFRESH_TOKEN ? (await refreshTokenFunction()).access_token! : process.env.LARK_USER_ACCESS_TOKEN!));
+      }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
       
       console.error("Received response:", JSON.stringify(result, null, 2));
       
@@ -456,7 +440,7 @@ const toolHandlers = {
             }],
             need_notification: false
           }
-        }, lark.withUserAccessToken(process.env.LARK_REFRESH_TOKEN ? (await refreshTokenFunction()).access_token! : process.env.LARK_USER_ACCESS_TOKEN!));
+        }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
 
         console.error("Add creator as attendee response:", JSON.stringify(attendeeResult, null, 2));
       }
@@ -545,7 +529,7 @@ const toolHandlers = {
           user_id_type: "user_id"
         },
         data: requestData
-      }, lark.withUserAccessToken(process.env.LARK_REFRESH_TOKEN ? (await refreshTokenFunction()).access_token! : process.env.LARK_USER_ACCESS_TOKEN!));
+      }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN!));
       
       console.error("Received response:", JSON.stringify(result, null, 2));
       
@@ -696,8 +680,7 @@ async function main() {
       'LARK_APP_SECRET',
       'LARK_USER_ID',
       'LARK_CALENDAR_ID',
-      //'LARK_USER_ACCESS_TOKEN', 
-      //'LARK_REFRESH_TOKEN',  Choose one of LARK_USER_ACCESS_TOKEN and LARK_REFRESH_TOKEN, use LARK_REFRESH_TOKEN first by default
+      'LARK_USER_ACCESS_TOKEN', 
       'SUPABASE_KEY',
       'SUPABASE_URL'
     ];
