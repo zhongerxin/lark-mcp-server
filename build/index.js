@@ -3,12 +3,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
+import { isRecurrenceInRange } from './utils/recurrence.js';
+import { createClient } from '@supabase/supabase-js';
 // Create Lark client instance
 const client = new lark.Client({
     appId: process.env.LARK_APP_ID,
     appSecret: process.env.LARK_APP_SECRET,
     loggerLevel: "error"
 });
+// Create Supabase client instance
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 // Validate schemas
 const schemas = {
     toolInputs: {
@@ -17,7 +23,8 @@ const schemas = {
         }),
         list_events: z.object({
             start_time: z.string(),
-            end_time: z.string()
+            end_time: z.string(),
+            calendar_id: z.string()
         }),
         create_event: z.object({
             summary: z.string(),
@@ -40,6 +47,9 @@ const schemas = {
                 approval_reason: z.string().optional()
             })),
             need_notification: z.boolean().optional()
+        }),
+        search_user_in_supabase: z.object({
+            name_query: z.string().min(1)
         })
     }
 };
@@ -65,6 +75,10 @@ const TOOL_DEFINITIONS = [
         inputSchema: {
             type: "object",
             properties: {
+                calendar_id: {
+                    type: "string",
+                    description: "ID of the calendar to list events from, default is the user's own calendar id please just use primary; If need a non-personal calendar_id please use search_user_in_supabase to find this person's calendar_id"
+                },
                 start_time: {
                     type: "string",
                     description: "Start time in ISO format with UTC+8 timezone (e.g. 2024-03-20T10:00:00+08:00)"
@@ -133,7 +147,7 @@ const TOOL_DEFINITIONS = [
                             },
                             user_id: {
                                 type: "string",
-                                description: "User ID when type is 'user'"
+                                description: "User ID when type is 'user',please use search_user_in_supabase to find this person's user_id"
                             },
                             chat_id: {
                                 type: "string",
@@ -170,6 +184,20 @@ const TOOL_DEFINITIONS = [
             },
             required: ["event_id", "attendees"]
         }
+    },
+    {
+        name: "search_user_in_supabase",
+        description: "Search for a user in Supabase database by partial name and get their user ID and calendar ID",
+        inputSchema: {
+            type: "object",
+            properties: {
+                name_query: {
+                    type: "string",
+                    description: "Partial name to search for in the user_name field (case insensitive)"
+                }
+            },
+            required: ["name_query"]
+        },
     }
 ];
 // Tool implementation handlers
@@ -224,16 +252,16 @@ const toolHandlers = {
         }
     },
     async list_events(args) {
-        const { start_time, end_time } = schemas.toolInputs.list_events.parse(args);
+        const { start_time, end_time, calendar_id } = schemas.toolInputs.list_events.parse(args);
         // Convert ISO strings to Unix timestamps
         const startUnix = Math.floor(new Date(start_time).getTime() / 1000).toString();
         const endUnix = Math.floor(new Date(end_time).getTime() / 1000).toString();
         const result = await client.calendar.v4.calendarEvent.list({
             path: {
-                calendar_id: process.env.LARK_CALENDAR_ID,
+                calendar_id: calendar_id === "primary" ? process.env.LARK_CALENDAR_ID : calendar_id,
             },
             params: {
-                page_size: 500,
+                page_size: 1000,
                 start_time: startUnix,
                 end_time: endUnix,
             }
@@ -257,8 +285,20 @@ const toolHandlers = {
         }
         const allEvents = result.data?.items || [];
         // Filter out cancelled events
-        const events = allEvents.filter(event => event.status !== "cancelled" &&
-            event.is_exception !== true);
+        const events = allEvents.filter(event => (event.status !== "cancelled" &&
+            event.start_time?.timestamp &&
+            event.end_time?.timestamp &&
+            parseInt(event.start_time.timestamp) >= parseInt(startUnix) &&
+            parseInt(event.end_time.timestamp) <= parseInt(endUnix)) ||
+            (event.recurrence !== "" &&
+                event.status !== "cancelled" &&
+                isRecurrenceInRange(event.recurrence || "", {
+                    startTime: parseInt(event.start_time?.timestamp || "0"),
+                    endTime: parseInt(event.end_time?.timestamp || "0")
+                }, {
+                    startTime: parseInt(startUnix),
+                    endTime: parseInt(endUnix)
+                })));
         // Format events in the desired structure
         const formattedEvents = events.map(event => {
             const startTimestamp = event.start_time?.timestamp || "0";
@@ -267,8 +307,10 @@ const toolHandlers = {
                 summary: event.summary || "",
                 organizer: event.event_organizer?.display_name || "",
                 status: event.status || "unknown",
-                startTime: new Date(parseInt(startTimestamp) * 1000).toISOString(),
-                endTime: new Date(parseInt(endTimestamp) * 1000).toISOString()
+                startTime: new Date(parseInt(startTimestamp) * 1000).toLocaleString(),
+                endTime: new Date(parseInt(endTimestamp) * 1000).toLocaleString(),
+                // 临时测试添加
+                rerecurrence: event.recurrence
             };
         });
         return {
@@ -297,7 +339,8 @@ const toolHandlers = {
                 end_time: {
                     timestamp: endTimestamp,
                     timezone: "Asia/Shanghai"
-                }
+                },
+                attendee_ability: "can_modify_event"
             };
             // Add optional fields if provided
             if (description) {
@@ -337,6 +380,27 @@ const toolHandlers = {
             const eventData = result.data?.event;
             const eventId = eventData?.event_id || "unknown";
             const eventSummary = eventData?.summary || summary;
+            // Add creator as attendee
+            if (eventId !== "unknown") {
+                const attendeeResult = await client.calendar.v4.calendarEventAttendee.create({
+                    path: {
+                        calendar_id: process.env.LARK_CALENDAR_ID,
+                        event_id: eventId
+                    },
+                    params: {
+                        user_id_type: "user_id"
+                    },
+                    data: {
+                        attendees: [{
+                                type: "user",
+                                user_id: process.env.LARK_USER_ID,
+                                is_optional: false
+                            }],
+                        need_notification: false
+                    }
+                }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN));
+                console.error("Add creator as attendee response:", JSON.stringify(attendeeResult, null, 2));
+            }
             return {
                 content: [{
                         type: "text",
@@ -410,6 +474,9 @@ const toolHandlers = {
                     calendar_id: process.env.LARK_CALENDAR_ID,
                     event_id: event_id
                 },
+                params: {
+                    user_id_type: "user_id"
+                },
                 data: requestData
             }, lark.withUserAccessToken(process.env.LARK_USER_ACCESS_TOKEN));
             console.error("Received response:", JSON.stringify(result, null, 2));
@@ -448,6 +515,65 @@ const toolHandlers = {
                     }]
             };
         }
+    },
+    async search_user_in_supabase(args) {
+        const { name_query } = schemas.toolInputs.search_user_in_supabase.parse(args);
+        try {
+            console.error(`Searching Supabase for users with name containing: ${name_query}`);
+            if (!supabaseKey) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: "Error: SUPABASE_KEY environment variable is not set."
+                        }]
+                };
+            }
+            // Perform a case-insensitive search with ILIKE
+            let { data, error } = await supabase
+                .from('lark_members')
+                .select('user_id, user_name, user_main_calendar_id')
+                .ilike('user_name', `%${name_query}%`);
+            if (error) {
+                console.error("Supabase query error:", error);
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Error querying Supabase: ${error.message}`
+                        }]
+                };
+            }
+            if (!data || data.length === 0) {
+                console.error('lark_members' + data);
+                return {
+                    content: [{
+                            type: "text",
+                            text: `No users found with name containing "${name_query}".`
+                        }]
+                };
+            }
+            // Format the results in a readable way
+            const formattedResults = data.map(user => ({
+                user_id: user.user_id,
+                user_name: user.user_name,
+                calendar_id: user.user_main_calendar_id
+            }));
+            return {
+                content: [{
+                        type: "text",
+                        text: `Found ${data.length} user(s) matching "${name_query}":\n\n${JSON.stringify(formattedResults, null, 2)}`
+                    }]
+            };
+        }
+        catch (error) {
+            console.error("Error searching users in Supabase:", error);
+            return {
+                content: [{
+                        type: "text",
+                        text: `Error searching users in Supabase: ${error instanceof Error ? error.message : "Unknown error"}`
+                    }]
+            };
+        }
+        ;
     }
 };
 // Create server instance
@@ -488,7 +614,9 @@ async function main() {
             'LARK_APP_SECRET',
             'LARK_USER_ID',
             'LARK_CALENDAR_ID',
-            'LARK_USER_ACCESS_TOKEN'
+            'LARK_USER_ACCESS_TOKEN',
+            'SUPABASE_KEY',
+            'SUPABASE_URL'
         ];
         const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
         if (missingVars.length > 0) {
@@ -499,7 +627,9 @@ async function main() {
             appId: process.env.LARK_APP_ID?.substring(0, 5) + '...',
             appSecret: process.env.LARK_APP_SECRET?.substring(0, 5) + '...',
             hasUserId: !!process.env.LARK_USER_ID,
-            hasCalendarId: !!process.env.LARK_CALENDAR_ID
+            hasCalendarId: !!process.env.LARK_CALENDAR_ID,
+            supabaseKey: process.env.SUPABASE_KEY?.substring(0, 8) + '...',
+            supabaseUrl: !!process.env.SUPABASE_URL
         });
         const transport = new StdioServerTransport();
         console.error("Created transport");
