@@ -13,12 +13,12 @@ interface TokenRefreshResponse {
 }
 
 /**
- * 使用 refresh_token 刷新飞书的 access_token
- * @param refreshToken - 用于刷新的 refresh_token
- * @param clientId - 应用的 App ID
- * @param clientSecret - 应用的 App Secret
- * @returns 返回刷新后的 token 信息
- * @throws 如果刷新失败会抛出错误
+ * Refresh Lark access_token using refresh_token
+ * @param refreshToken - The refresh_token used for refreshing
+ * @param clientId - Application's App ID
+ * @param clientSecret - Application's App Secret
+ * @returns Returns refreshed token information
+ * @throws Throws an error if refresh fails
  */
 export async function refreshAccessToken(
   refreshToken: string,

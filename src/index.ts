@@ -336,7 +336,7 @@ const toolHandlers = {
         status: event.status || "unknown",
         startTime: new Date(parseInt(startTimestamp) * 1000).toLocaleString(),
         endTime: new Date(parseInt(endTimestamp) * 1000).toLocaleString(),
-        // 临时测试添加
+        // Temporarily added for test purposes
         rerecurrence: event.recurrence
       };
     });
